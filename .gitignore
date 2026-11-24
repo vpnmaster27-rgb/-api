@@ -1,0 +1,14 @@
+# 依賴
+node_modules/
+
+# 環境變數（含敏感設定，勿提交）
+.env
+
+# 資料庫與日誌
+data/*.accdb
+data/*.mdb
+data/*.laccdb
+*.log
+
+# 探測用暫存腳本
+scripts/_probe*.mjs

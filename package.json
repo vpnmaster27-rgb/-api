@@ -1,0 +1,24 @@
+{
+  "name": "dispatch-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "維修派工 APP 後端 API（Express + Supabase PostgreSQL）",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "db:init": "node scripts/init-db.mjs",
+    "user:add": "node scripts/add-user.mjs"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.1.0",
+    "pg": "^8.23.1"
+  }
+}

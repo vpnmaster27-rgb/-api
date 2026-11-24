@@ -1,0 +1,160 @@
+import { Router } from 'express';
+import { withDb } from '../db.js';
+import { taipeiDateKey, taskStartDateKey } from '../taskDates.js';
+
+export const tasksRouter = Router();
+
+const validId = (id) => typeof id === 'string' && id.length > 0 && id.length <= 64 && !id.includes('\0');
+const validTask = (task) => task && typeof task === 'object' && !Array.isArray(task)
+  && validId(String(task.id ?? ''));
+
+/** 表單內容僅供 App 當次填寫，不送回或保存到後端。 */
+function withoutFormData(task) {
+  if (!task || typeof task !== 'object' || Array.isArray(task)) return task;
+  const { formData: _formData, ...savedTask } = task;
+  return savedTask;
+}
+
+async function readTasks(conn) {
+  const rows = await conn.query('SELECT payload FROM public.work_orders ORDER BY updated_at DESC');
+  return (rows ?? []).flatMap((row) => {
+    try {
+      const task = JSON.parse(String(row.payload ?? ''));
+      return validTask(task) ? [withoutFormData(task)] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+async function upsertTask(conn, task) {
+  const savedTask = withoutFormData(task);
+  await conn.query(
+    `INSERT INTO public.work_orders (id, payload, updated_at)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (id) DO UPDATE
+     SET payload = EXCLUDED.payload, updated_at = EXCLUDED.updated_at`,
+    [String(savedTask.id), JSON.stringify(savedTask), Date.now()],
+  );
+  return savedTask;
+}
+
+function markForToday(task) {
+  const today = taipeiDateKey();
+  return taskStartDateKey(task) === today && task.mobileDispatchDate !== today
+    ? { ...task, mobileDispatchDate: today }
+    : task;
+}
+
+function completedRetentionHours() {
+  const configured = Number(process.env.APP_COMPLETED_TASK_RETENTION_HOURS ?? 0);
+  return Number.isFinite(configured) && configured > 0 ? configured : 0;
+}
+
+function isVisibleInApp(task, now = Date.now()) {
+  if (!task.mobileDispatchDate) return false;
+  const completed = task.status === 'done' || task.mobileStatus === 'done';
+  const retentionHours = completedRetentionHours();
+  if (!completed || retentionHours === 0) return true;
+  const completedAt = Number(task.completedAt);
+  // Older completed records without a timestamp remain visible because their age is unknown.
+  return !Number.isFinite(completedAt) || completedAt <= 0 || now < completedAt + retentionHours * 60 * 60 * 1000;
+}
+
+function isOverdueForApp(task, now = Date.now()) {
+  const dueAt = Number(task.dueAt || 0);
+  const status = task.status === 'done'
+    ? 'done'
+    : (task.mobileStatus || (() => {
+      if (!task.technicianId && task.status === 'pending') return 'unassigned';
+      if (task.status === 'parts') return 'waiting_upload';
+      return 'todo';
+    })());
+  return dueAt > 0 && dueAt < now && status !== 'done' && status !== 'unassigned';
+}
+
+tasksRouter.get('/tasks', async (_req, res, next) => {
+  try {
+    const tasks = await withDb(readTasks);
+    res.set('Cache-Control', 'no-store');
+    res.json({ tasks, count: tasks.length });
+  } catch (err) { next(err); }
+});
+
+tasksRouter.get('/tasks/app', async (_req, res, next) => {
+  try {
+    const today = taipeiDateKey();
+    const tasks = await withDb(readTasks);
+    // Keep missed/older unfinished work orders visible as overdue. The daily
+    // dispatch marker still controls normal tasks, while supervisors can review
+    // every overdue task even if it was created before the daily App dispatch.
+    const appTasks = tasks.filter((task) => (
+      (task.mobileDispatchDate && task.mobileDispatchDate <= today && isVisibleInApp(task))
+      || isOverdueForApp(task)
+    ));
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      tasks: appTasks,
+      count: appTasks.length,
+      date: today,
+      timeZone: 'Asia/Taipei',
+      completedRetentionHours: completedRetentionHours(),
+    });
+  } catch (err) { next(err); }
+});
+
+/** Web's one-time localStorage migration. The first complete dataset wins. */
+tasksRouter.post('/tasks/initialize', async (req, res, next) => {
+  try {
+    const tasks = req.body?.tasks;
+    if (!Array.isArray(tasks) || tasks.length > 10000 || !tasks.every(validTask)) {
+      return res.status(400).json({ error: 'invalid_tasks', message: '任務資料格式不正確' });
+    }
+    const result = await withDb(async (conn) => {
+      const current = await conn.query('SELECT COUNT(*)::int AS task_count FROM public.work_orders');
+      let imported = 0;
+      for (const originalTask of tasks) {
+        const task = markForToday(originalTask);
+        const exists = await conn.query('SELECT id FROM public.work_orders WHERE id = $1', [String(task.id)]);
+        if (exists.length) continue;
+        await upsertTask(conn, task);
+        imported += 1;
+      }
+      return { initialized: Number(current?.[0]?.task_count ?? 0) === 0, imported };
+    });
+    res.status(result.imported ? 201 : 200).json(result);
+  } catch (err) { next(err); }
+});
+
+tasksRouter.post('/tasks/sync', async (req, res, next) => {
+  try {
+    const tasks = req.body?.tasks ?? [];
+    const deletedIds = req.body?.deletedIds ?? [];
+    if (!Array.isArray(tasks) || tasks.length > 10000 || !tasks.every(validTask)
+      || !Array.isArray(deletedIds) || deletedIds.length > 10000 || !deletedIds.every(validId)) {
+      return res.status(400).json({ error: 'invalid_tasks', message: '任務資料格式不正確' });
+    }
+    await withDb(async (conn) => {
+      for (const task of tasks) await upsertTask(conn, markForToday(task));
+      for (const id of deletedIds) await conn.query('DELETE FROM public.work_orders WHERE id = $1', [id]);
+    });
+    res.json({ saved: tasks.length, deleted: deletedIds.length });
+  } catch (err) { next(err); }
+});
+
+tasksRouter.put('/tasks/:id', async (req, res, next) => {
+  try {
+    const task = req.body && {
+      ...req.body,
+      technicianName: req.body.technicianName || req.body.assignedTo || '',
+      ...(req.body.status === 'done' && !req.body.completedAt ? { completedAt: Date.now() } : {}),
+    };
+    if (!validId(req.params.id) || !validTask(task) || String(task.id) !== req.params.id) {
+      return res.status(400).json({ error: 'invalid_task', message: '任務資料格式不正確' });
+    }
+    const dispatchedTask = withoutFormData(markForToday(task));
+    await withDb((conn) => upsertTask(conn, dispatchedTask));
+    res.set('Cache-Control', 'no-store');
+    res.json({ task: dispatchedTask });
+  } catch (err) { next(err); }
+});
