@@ -29,13 +29,21 @@ async function readTasks(conn) {
 
 async function upsertTask(conn, task) {
   const savedTask = withoutFormData(task);
-  await conn.query(
+  const updated = await conn.query(
     `INSERT INTO public.work_orders (id, payload, updated_at)
      VALUES ($1, $2, $3)
      ON CONFLICT (id) DO UPDATE
-     SET payload = EXCLUDED.payload, updated_at = EXCLUDED.updated_at`,
+     SET payload = EXCLUDED.payload, updated_at = EXCLUDED.updated_at
+     WHERE COALESCE((public.work_orders.payload::jsonb->>'transferredAt')::bigint, 0)
+       <= COALESCE((EXCLUDED.payload::jsonb->>'transferredAt')::bigint, 0)
+     RETURNING id`,
     [String(savedTask.id), JSON.stringify(savedTask), Date.now()],
   );
+  if (!updated.length) {
+    const error = new Error('任務已轉移，請重新整理後再操作');
+    error.status = 409;
+    throw error;
+  }
   return savedTask;
 }
 
@@ -139,6 +147,37 @@ tasksRouter.post('/tasks/sync', async (req, res, next) => {
       for (const id of deletedIds) await conn.query('DELETE FROM public.work_orders WHERE id = $1', [id]);
     });
     res.json({ saved: tasks.length, deleted: deletedIds.length });
+  } catch (err) { next(err); }
+});
+
+tasksRouter.post('/tasks/:id/transfer', async (req, res, next) => {
+  try {
+    if (!validId(req.params.id) || !Number.isInteger(Number(req.body?.account))) {
+      return res.status(400).json({ message: '請選擇有效的處理人' });
+    }
+    const result = await withDb(async (conn) => {
+      const [person] = await conn.query('SELECT id, account, username FROM public.users WHERE account = $1', [Number(req.body.account)]);
+      if (!person) return { status: 400, message: '找不到指定處理人' };
+      const [row] = await conn.query('SELECT payload FROM public.work_orders WHERE id = $1', [req.params.id]);
+      if (!row) return { status: 404, message: '找不到此工單' };
+      const previous = JSON.parse(row.payload);
+      const time = Date.now();
+      const from = previous.assignedTo || previous.technicianName || '未分派';
+      const actor = String(req.body.actor || 'Web 管理者').slice(0, 100);
+      const task = withoutFormData({ ...previous,
+        technicianId: Number(person.id), technicianName: person.username,
+        assignedTo: person.username, assignedToId: Number(person.account), assignedAccount: Number(person.account),
+        assignedBy: actor, transferredAt: time, transferredFrom: from,
+        status: 'progress', mobileStatus: 'todo', completedAt: null, companions: [],
+        mobileDispatchDate: previous.mobileDispatchDate || taipeiDateKey(),
+        timeline: [...(previous.timeline || []), { time, text: `任務轉移：${from} → ${person.username}（操作人：${actor}）` }],
+      });
+      const updated = await conn.query('UPDATE public.work_orders SET payload = $1, updated_at = $2 WHERE id = $3 AND payload = $4 RETURNING id', [JSON.stringify(task), time, req.params.id, row.payload]);
+      return updated.length ? { task } : { status: 409, message: '工單已更新，請重新整理後再轉移' };
+    });
+    if (result.status) return res.status(result.status).json({ message: result.message });
+    res.set('Cache-Control', 'no-store');
+    res.json(result);
   } catch (err) { next(err); }
 });
 

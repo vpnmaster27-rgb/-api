@@ -70,6 +70,7 @@ export function createApp() {
 
   // 統一錯誤處理：對外只回通用訊息，細節留在伺服器日誌
   app.use((err, _req, res, _next) => {
+    if (err?.status === 409) return res.status(409).json({ error: 'task_conflict', message: err.message });
     if (err?.type === 'entity.parse.failed') {
       return res.status(400).json({ error: 'invalid_json', message: '請求內容不是合法的 JSON' });
     }
