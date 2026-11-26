@@ -1,8 +1,9 @@
 import { rotationKey, remainingMembers, chooseRotation } from './taskRotation.js';
 import { taskStartDateKey } from './taskDates.js';
 import { createHash } from 'node:crypto';
+import { isPresentForDispatch, applyAttendanceResult } from './dispatchAttendance.js';
 
-export async function rotateScheduledTasks(conn, dateKey, dispatchToday = false) {
+export async function rotateScheduledTasks(conn, dateKey, dispatchToday = false, attendanceCheck = isPresentForDispatch) {
   const people = await conn.query('SELECT id, account, username FROM public.users WHERE supervisor = false ORDER BY id');
   if (!people.length) return 0;
   const rows = await conn.query('SELECT id, payload FROM public.work_orders FOR UPDATE');
@@ -10,6 +11,12 @@ export async function rotateScheduledTasks(conn, dateKey, dispatchToday = false)
   const states = new Map((await conn.query('SELECT task_key, state FROM public.task_rotation_states')).map(r => [r.task_key, r.state]));
   const logs = new Map((await conn.query('SELECT work_order_id, assignment FROM public.task_auto_assignments')).map(r => [r.work_order_id, r.assignment]));
   const accounts = people.map(p => String(p.account));
+  // Freeze an initial roster for every planned job, even if its first scheduled
+  // occurrence is still in the future. A later newcomer waits for round two.
+  for (const task of tasks) {
+    const key = rotationKey(task);
+    if (key && !states.has(key)) states.set(key, { round: 1, members: [...accounts], used: [] });
+  }
   const hours = new Map();
   const daily = new Map();
   const dailyFor = date => { if (!daily.has(date)) daily.set(date, new Map()); return daily.get(date); };
@@ -69,12 +76,13 @@ export async function rotateScheduledTasks(conn, dateKey, dispatchToday = false)
     states.set(key,state);
     occupy(date,person.account,task.hours);
     const assignment = { account: Number(person.account), username: person.username, round: state.round, date, members: [...state.members], preview: !actual };
-    const next = { ...task, autoAssignment: assignment };
+    let next = { ...task, autoAssignment: assignment };
     if (!task.transferredAt && !task.assignedBy) Object.assign(next, {
       technicianId: Number(person.id), technicianName: person.username, assignedTo: person.username,
       assignedToId: Number(person.account), assignedAccount: Number(person.account),
     });
     if (actual) {
+      next = applyAttendanceResult(next, await attendanceCheck(conn, person.account, dateKey));
       await saveLog(task,assignment);
       next.mobileDispatchDate = dateKey;
       next.timeline = [...(task.timeline || []), { time: Date.now(), text: `自動輪派第 ${state.round} 輪：${person.username}` }];
