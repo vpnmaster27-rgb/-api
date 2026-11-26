@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { Router } from 'express';
-import { withDb } from '../db.js';
-import { taipeiDateKey, taskStartDateKey, taskDeadlineAt } from '../taskDates.js';
+import { withDb, withDispatchTransaction } from '../db.js';
+import { taipeiDateKey, taskStartDateKey, taskDeadlineAt, taipeiTimeIsPastDispatch } from '../taskDates.js';
+import { rotateScheduledTasks } from '../rotationDispatch.js';
 
 export const tasksRouter = Router();
 
@@ -29,7 +30,23 @@ async function readTasks(conn) {
 }
 
 async function upsertTask(conn, task) {
-  const savedTask = withoutFormData(task);
+  let savedTask = withoutFormData(task);
+  const [existing] = await conn.query('SELECT payload FROM public.work_orders WHERE id=$1', [String(task.id)]);
+  if (existing) {
+    const previous = JSON.parse(existing.payload);
+    if (previous.autoAssignment) {
+      savedTask.autoAssignment = previous.autoAssignment;
+      // Neither a stale plan nor an ordinary status update can rewrite who
+      // received an actual automatic dispatch. Manual transfers use their endpoint.
+      if (previous.mobileDispatchDate || previous.transferredAt || previous.assignedBy) {
+        for (const key of ['technicianId','technicianName','assignedTo','assignedToId','assignedAccount','assignedBy','mobileDispatchDate']) {
+          if (previous[key] !== undefined) savedTask[key] = previous[key];
+        }
+      }
+      const events = [...(previous.timeline || []), ...(savedTask.timeline || [])];
+      savedTask.timeline = [...new Map(events.map(event => [`${event.time}:${event.text}`, event])).values()];
+    }
+  }
   const updated = await conn.query(
     `INSERT INTO public.work_orders (id, payload, updated_at)
      VALUES ($1, $2, $3)
@@ -49,6 +66,7 @@ async function upsertTask(conn, task) {
 }
 
 function markForToday(task) {
+  if (task.automationRuleId === 'maintenance-45-items') return task;
   const today = taipeiDateKey();
   return taskStartDateKey(task) === today && task.mobileDispatchDate !== today
     ? { ...task, mobileDispatchDate: today }
@@ -146,9 +164,10 @@ tasksRouter.post('/tasks/sync', async (req, res, next) => {
       || !Array.isArray(deletedIds) || deletedIds.length > 10000 || !deletedIds.every(validId)) {
       return res.status(400).json({ error: 'invalid_tasks', message: '任務資料格式不正確' });
     }
-    await withDb(async (conn) => {
+    await withDispatchTransaction(async (conn) => {
       for (const task of tasks) await upsertTask(conn, markForToday(task));
       for (const id of deletedIds) await conn.query('DELETE FROM public.work_orders WHERE id = $1', [id]);
+      await rotateScheduledTasks(conn, taipeiDateKey(), taipeiTimeIsPastDispatch());
     });
     res.json({ saved: tasks.length, deleted: deletedIds.length });
   } catch (err) { next(err); }

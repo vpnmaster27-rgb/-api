@@ -36,6 +36,21 @@ export async function withDb(work) {
   });
 }
 
+/** Rotation, its audit records and work orders commit together on one connection. */
+export async function withDispatchTransaction(work) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SELECT pg_advisory_xact_lock(72411026)");
+    const result = await work({ query: async (sql, values = []) => (await client.query(sql, values)).rows });
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+}
+
 /** 連線測試：回傳帳號筆數，不回傳任何個人或密碼資料。 */
 export async function healthCheck() {
   const rows = await withDb((conn) => conn.query('SELECT COUNT(*)::int AS user_count FROM public.users'));

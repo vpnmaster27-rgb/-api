@@ -1,8 +1,10 @@
-import { withDb } from './db.js';
+import { withDispatchTransaction } from './db.js';
+import { rotateScheduledTasks } from './rotationDispatch.js';
 import { nextDailyDispatchAt, taipeiDateKey, taskStartDateKey, taipeiTimeIsPastDispatch } from './taskDates.js';
 
 export async function dispatchTasksForDate(dateKey = taipeiDateKey()) {
-  return withDb(async (conn) => {
+  return withDispatchTransaction(async (conn) => {
+    await rotateScheduledTasks(conn, dateKey, true);
     const rows = await conn.query('SELECT id, payload FROM public.work_orders');
     let dispatched = 0;
     for (const row of rows ?? []) {
