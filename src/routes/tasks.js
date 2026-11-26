@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import { Router } from 'express';
 import { withDb } from '../db.js';
-import { taipeiDateKey, taskStartDateKey } from '../taskDates.js';
+import { taipeiDateKey, taskStartDateKey, taskDeadlineAt } from '../taskDates.js';
 
 export const tasksRouter = Router();
 
@@ -12,7 +13,7 @@ const validTask = (task) => task && typeof task === 'object' && !Array.isArray(t
 function withoutFormData(task) {
   if (!task || typeof task !== 'object' || Array.isArray(task)) return task;
   const { formData: _formData, ...savedTask } = task;
-  return savedTask;
+  return { ...savedTask, dueAt: taskDeadlineAt(savedTask) };
 }
 
 async function readTasks(conn) {
@@ -70,7 +71,7 @@ function isVisibleInApp(task, now = Date.now()) {
 }
 
 function isOverdueForApp(task, now = Date.now()) {
-  const dueAt = Number(task.dueAt || 0);
+  const dueAt = taskDeadlineAt(task);
   const status = task.status === 'done'
     ? 'done'
     : (task.mobileStatus || (() => {
@@ -89,7 +90,7 @@ tasksRouter.get('/tasks', async (_req, res, next) => {
   } catch (err) { next(err); }
 });
 
-tasksRouter.get('/tasks/app', async (_req, res, next) => {
+tasksRouter.get('/tasks/app', async (req, res, next) => {
   try {
     const today = taipeiDateKey();
     const tasks = await withDb(readTasks);
@@ -100,14 +101,17 @@ tasksRouter.get('/tasks/app', async (_req, res, next) => {
       (task.mobileDispatchDate && task.mobileDispatchDate <= today && isVisibleInApp(task))
       || isOverdueForApp(task)
     ));
-    res.set('Cache-Control', 'no-store');
-    res.json({
+    const response = JSON.stringify({
       tasks: appTasks,
       count: appTasks.length,
       date: today,
       timeZone: 'Asia/Taipei',
       completedRetentionHours: completedRetentionHours(),
     });
+    const etag = `"${createHash('sha256').update(response).digest('base64url')}"`;
+    res.set({ 'Cache-Control': 'no-store', ETag: etag });
+    if (req.get('If-None-Match') === etag) return res.status(304).end();
+    res.type('json').send(response);
   } catch (err) { next(err); }
 });
 

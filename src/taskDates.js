@@ -1,5 +1,18 @@
 export const TASK_TIME_ZONE = 'Asia/Taipei';
 
+// D+7 is an inclusive calendar day in Asia/Taipei, ending at 23:59:59.999.
+export function taskDeadlineAt(task) {
+  const start = task.startAt || task.startDate || task.createdAt;
+  const value = start || task.dueAt;
+  if (!value) return null;
+  const literal = typeof value === 'string' && value.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
+  const date = literal
+    ? new Date(Date.UTC(Number(literal[1]), Number(literal[2]) - 1, Number(literal[3])))
+    : new Date(new Date(value).getTime() + 8 * 3600000);
+  if (!Number.isFinite(date.getTime())) return null;
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + (start ? 8 : 1)) - 8 * 3600000 - 1;
+}
+
 function dateKeyFromParts(parts) {
   const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
   return `${values.year}-${values.month}-${values.day}`;

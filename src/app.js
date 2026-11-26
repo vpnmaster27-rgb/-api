@@ -20,6 +20,7 @@ export function createApp() {
   app.use(
     cors({
       origin: allowed === '*' ? '*' : allowed.split(',').map((s) => s.trim()),
+      exposedHeaders: ['ETag'],
     }),
   );
 
