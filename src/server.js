@@ -4,6 +4,7 @@ const { createApp } = await import('./app.js');
 const { shutdown, healthCheck } = await import('./db.js');
 const { startDailyTaskDispatch } = await import('./dailyTaskDispatch.js');
 const { startRosterRotationWatch } = await import('./rosterRotationWatch.js');
+const { startPushNotifications } = await import('./pushNotifications.js');
 
 const PORT = Number.parseInt(process.env.PORT ?? '3000', 10);
 
@@ -18,6 +19,7 @@ try {
 const app = createApp();
 const stopDailyTaskDispatch = startDailyTaskDispatch();
 const stopRosterRotationWatch = startRosterRotationWatch();
+const stopPushNotifications = startPushNotifications();
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`[dispatch-api] 已在 0.0.0.0:${PORT} 啟動`);
@@ -28,6 +30,7 @@ async function stop(signal) {
   server.close(async () => {
     stopDailyTaskDispatch();
     stopRosterRotationWatch();
+    stopPushNotifications();
     await shutdown();
     process.exit(0);
   });

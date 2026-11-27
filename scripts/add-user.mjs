@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { withDb, shutdown } from '../src/db.js';
 
 /**
- * 新增使用者（明碼儲存，僅供內部測試）
+ * 新增使用者（依業務要求明碼儲存，下次登入強制設定密碼）
  *
  * 用法：
  *   node scripts/add-user.mjs <員工編號> <顯示名稱> <密碼> [群組]
@@ -14,7 +14,7 @@ const [accountArg, usernameArg, password, groupArg = '一般機電'] = process.a
 function usage(message) {
   if (message) console.error(`錯誤：${message}\n`);
   console.error('用法：node scripts/add-user.mjs <員工編號> <顯示名稱> <密碼> [群組]');
-  console.error('例如：node scripts/add-user.mjs 900005 王小明 MyPassword123 一般機電');
+  console.error('例如：node scripts/add-user.mjs 900005 王小明 Pass123 一般機電');
   process.exitCode = 1;
 }
 
@@ -25,7 +25,7 @@ function validate(account, name, pass) {
     return '員工編號超出可安全使用的數字範圍';
   }
   if (!name || name.length > 64) return '顯示名稱不可空白或超過 64 個字元';
-  if (!pass) return '密碼不可為空';
+  if ([...pass].length<4 || [...pass].length>10) return '密碼需為 4～10 碼';
   return null;
 }
 

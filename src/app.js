@@ -58,7 +58,7 @@ export function createApp() {
       limit: 10,
       standardHeaders: 'draft-8',
       legacyHeaders: false,
-      skip: (req) => req.path === '/health',
+      skip: (req) => ['/health','/session/resume','/session/logout','/devices/bind'].includes(req.path),
     }),
   );
 
